@@ -147,11 +147,15 @@
     form.addEventListener(
       'submit',
       function (e) {
+        // If this is a synthetic re-dispatch for GTM, let it bubble through
+        if (isSubmitting) {
+          e.preventDefault();
+          return;
+        }
+
         e.preventDefault();
         // Prevent Webflow's native form handler from also processing this
         e.stopImmediatePropagation();
-
-        if (isSubmitting) return;
         isSubmitting = true;
 
         // Re-populate fields right before submit (in case URL changed)
@@ -186,20 +190,14 @@
           }
         }
 
+        var gtmSubmitFired = false;
+
         function showSuccess() {
-          // Push all form data to dataLayer for GTM
-          window.dataLayer = window.dataLayer || [];
-          var formObject = {};
-          formData.forEach(function(value, key) {
-            formObject[key] = value.trim ? value.trim() : value;
-          });
-          window.dataLayer.push({
-            'event': 'gtm.formSubmit',
-            'gtm.element': form,
-            'gtm.elementId': form.id || '',
-            'gtm.elementClasses': form.className || '',
-            'form_data': formObject
-          });
+          // Dispatch a real submit event so GTM's native Form Submission trigger fires
+          if (!gtmSubmitFired) {
+            gtmSubmitFired = true;
+            form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          }
 
           // Check for redirect URL
           var redirectUrl = form.getAttribute('data-redirect');
