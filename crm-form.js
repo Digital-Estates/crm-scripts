@@ -194,8 +194,10 @@
             formObject[key] = value.trim ? value.trim() : value;
           });
           window.dataLayer.push({
-            'event': 'form_submitted',
-            'form_id': form.id || '',
+            'event': 'gtm.formSubmit',
+            'gtm.element': form,
+            'gtm.elementId': form.id || '',
+            'gtm.elementClasses': form.className || '',
             'form_data': formObject
           });
 
