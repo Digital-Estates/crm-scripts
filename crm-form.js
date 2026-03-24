@@ -187,6 +187,18 @@
         }
 
         function showSuccess() {
+          // Push all form data to dataLayer for GTM
+          window.dataLayer = window.dataLayer || [];
+          var formObject = {};
+          formData.forEach(function(value, key) {
+            formObject[key] = value.trim ? value.trim() : value;
+          });
+          window.dataLayer.push({
+            'event': 'form_submitted',
+            'form_id': form.id || '',
+            'form_data': formObject
+          });
+
           // Check for redirect URL
           var redirectUrl = form.getAttribute('data-redirect');
           if (redirectUrl) {
