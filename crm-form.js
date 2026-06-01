@@ -14,7 +14,7 @@
       'referrer_url',
       'landing_page',
       'lead_form',
-      'property_id',
+      'unit_id',
       'user_id',
     ];
 
@@ -60,10 +60,10 @@
       leadFormField.value = form.id;
     }
 
-    // Property ID / Bolig ID (from URL param)
-    var propertyField = form.querySelector('input[name="property_id"]');
-    if (propertyField) {
-      propertyField.value = urlParams.get('bolig-id') || '';
+    // Unit ID / Bolig ID (from URL param)
+    var unitField = form.querySelector('input[name="unit_id"]');
+    if (unitField) {
+      unitField.value = urlParams.get('bolig-id') || '';
     }
 
     // User ID (from cookie)
