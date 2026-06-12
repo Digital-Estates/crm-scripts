@@ -36,8 +36,10 @@
     return hcaptchaApiPromise;
   }
 
-  // Honeypot + page-load timestamp. These feed anti-bot checks the server
-  // already performs; only added to forms that opt in via the CRM toggle.
+  // Honeypot field — feeds the server-side honeypot check; only added to forms
+  // that opt in via the CRM toggle. A real visitor never fills it.
+  // (No page-load timestamp: hCaptcha already covers timing-based bot detection,
+  // and a fixed "too fast" gate risks rejecting a quick real lead.)
   function addBotProtectionFields(form) {
     if (!form.querySelector('input[name="website"]')) {
       var hp = document.createElement('input');
@@ -53,13 +55,6 @@
       hp.style.width = '0';
       form.appendChild(hp);
     }
-    if (!form.querySelector('input[name="_form_timestamp"]')) {
-      var ts = document.createElement('input');
-      ts.type = 'hidden';
-      ts.name = '_form_timestamp';
-      ts.value = Math.floor(Date.now() / 1000).toString();
-      form.appendChild(ts);
-    }
   }
 
   function setupCaptcha(form, sitekey) {
@@ -68,7 +63,7 @@
     var state = { sitekey: sitekey, widgetId: null, ready: false, token: null };
     form._deCaptcha = state;
 
-    loadHcaptchaApi()
+    state.readyPromise = loadHcaptchaApi()
       .then(function () {
         var container = document.createElement('div');
         container.style.display = 'none';
@@ -119,23 +114,38 @@
     return state;
   }
 
-  // Resolves to a fresh hCaptcha token, or null if the widget isn't ready
-  // (in which case the server will reject a protected submission and the user
-  // can retry once it has loaded).
+  // Resolves to a fresh hCaptcha token, or null if the widget genuinely failed
+  // to load (e.g. blocked by an ad-blocker) — in which case the server rejects
+  // and the user sees a retry-able error. Waits for the widget to finish
+  // initialising first (capped), so a fast submit doesn't fail just because
+  // hCaptcha hadn't loaded yet.
   function getCaptchaToken(state) {
-    return new Promise(function (resolve) {
-      if (!state || !state.ready || !window.hcaptcha || state.widgetId === null) {
-        resolve(null);
-        return;
-      }
-      state._resolve = resolve;
-      try {
-        window.hcaptcha.reset(state.widgetId);
-        window.hcaptcha.execute(state.widgetId);
-      } catch (e) {
-        state._resolve = null;
-        resolve(null);
-      }
+    if (!state) {
+      return Promise.resolve(null);
+    }
+
+    var ready = Promise.race([
+      Promise.resolve(state.readyPromise),
+      new Promise(function (resolve) {
+        setTimeout(resolve, 8000);
+      }),
+    ]);
+
+    return ready.then(function () {
+      return new Promise(function (resolve) {
+        if (!state.ready || !window.hcaptcha || state.widgetId === null) {
+          resolve(null);
+          return;
+        }
+        state._resolve = resolve;
+        try {
+          window.hcaptcha.reset(state.widgetId);
+          window.hcaptcha.execute(state.widgetId);
+        } catch (e) {
+          state._resolve = null;
+          resolve(null);
+        }
+      });
     });
   }
 
