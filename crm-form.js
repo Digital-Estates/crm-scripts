@@ -430,6 +430,8 @@
           fallbackForm.submit();
         }
 
+        var captchaRetried = false;
+
         function sendFormData() {
           fetch(endpoint, {
             method: 'POST',
@@ -447,6 +449,18 @@
                 .then(function (data) {
                   if (res.ok && data.status === 'ok') {
                     showSuccess();
+                  } else if (
+                    res.status === 422 &&
+                    data &&
+                    data.error === 'Captcha verification failed' &&
+                    !captchaRetried
+                  ) {
+                    // The server requires a captcha this page didn't satisfy —
+                    // e.g. the CRM toggle was enabled while this page was
+                    // already open, or a stale cached config. Re-check the
+                    // config fresh (bypassing cache) and retry exactly once.
+                    captchaRetried = true;
+                    refreshCaptchaAndRetry();
                   } else {
                     showError();
                   }
@@ -457,6 +471,43 @@
               // Fall back to regular form POST.
               console.warn('DE Form: fetch blocked, falling back to form POST', err);
               fallbackFormPost();
+            });
+        }
+
+        // Re-fetch this form's config bypassing the browser cache, set up the
+        // widget if needed, obtain a token and resend. Called at most once per
+        // submission, so it can never loop.
+        function refreshCaptchaAndRetry() {
+          var configUrl = configUrlFor(form);
+          if (!configUrl) {
+            showError();
+            return;
+          }
+          fetch(configUrl, {
+            headers: { Accept: 'application/json' },
+            cache: 'reload',
+          })
+            .then(function (res) {
+              return res.ok ? res.json() : null;
+            })
+            .then(function (cfg) {
+              if (!cfg || !cfg.require_captcha || !cfg.hcaptcha_sitekey) {
+                // Config no longer says protected — just resend once.
+                sendFormData();
+                return;
+              }
+              if (!form._deCaptcha) {
+                setupCaptcha(form, cfg.hcaptcha_sitekey);
+              }
+              getCaptchaToken(form._deCaptcha).then(function (token) {
+                if (token) {
+                  formData.set('h-captcha-response', token);
+                }
+                sendFormData();
+              });
+            })
+            .catch(function () {
+              showError();
             });
         }
 
