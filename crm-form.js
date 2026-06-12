@@ -1,5 +1,143 @@
 (function () {
   var DE_FORM_SELECTOR = 'form[action*="digitalestates.dk"]';
+  var HCAPTCHA_API = 'https://js.hcaptcha.com/1/api.js?render=explicit';
+  var hcaptchaApiPromise = null;
+
+  // ===========================================
+  // 0. BOT PROTECTION (hCaptcha)
+  // Activated per-form by the CRM "Require CAPTCHA" toggle. The server tells us
+  // via the /config endpoint whether to render the widget; nothing below runs
+  // for forms that have the toggle off.
+  // ===========================================
+  // Returns the config URL for a standard leads form, or null if the form's
+  // action isn't a leads endpoint (in which case we never pre-flight it).
+  function configUrlFor(form) {
+    var action = form.getAttribute('action') || '';
+    if (!/\/leads(\?.*)?$/.test(action)) return null;
+    return action.replace(/\/leads(\?.*)?$/, '/config');
+  }
+
+  function loadHcaptchaApi() {
+    if (window.hcaptcha) return Promise.resolve();
+    if (hcaptchaApiPromise) return hcaptchaApiPromise;
+    hcaptchaApiPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = HCAPTCHA_API;
+      s.async = true;
+      s.defer = true;
+      s.onload = function () {
+        resolve();
+      };
+      s.onerror = function () {
+        reject(new Error('hCaptcha failed to load'));
+      };
+      document.head.appendChild(s);
+    });
+    return hcaptchaApiPromise;
+  }
+
+  // Honeypot + page-load timestamp. These feed anti-bot checks the server
+  // already performs; only added to forms that opt in via the CRM toggle.
+  function addBotProtectionFields(form) {
+    if (!form.querySelector('input[name="website"]')) {
+      var hp = document.createElement('input');
+      hp.type = 'text';
+      hp.name = 'website';
+      hp.tabIndex = -1;
+      hp.autocomplete = 'off';
+      hp.setAttribute('aria-hidden', 'true');
+      hp.style.position = 'absolute';
+      hp.style.left = '-9999px';
+      hp.style.opacity = '0';
+      hp.style.height = '0';
+      hp.style.width = '0';
+      form.appendChild(hp);
+    }
+    if (!form.querySelector('input[name="_form_timestamp"]')) {
+      var ts = document.createElement('input');
+      ts.type = 'hidden';
+      ts.name = '_form_timestamp';
+      ts.value = Math.floor(Date.now() / 1000).toString();
+      form.appendChild(ts);
+    }
+  }
+
+  function setupCaptcha(form, sitekey) {
+    addBotProtectionFields(form);
+
+    var state = { sitekey: sitekey, widgetId: null, ready: false, token: null };
+    form._deCaptcha = state;
+
+    loadHcaptchaApi()
+      .then(function () {
+        var container = document.createElement('div');
+        container.style.display = 'none';
+        form.appendChild(container);
+
+        state.widgetId = window.hcaptcha.render(container, {
+          sitekey: sitekey,
+          size: 'invisible',
+          callback: function (token) {
+            state.token = token;
+            if (state._resolve) {
+              state._resolve(token);
+              state._resolve = null;
+            }
+          },
+          'error-callback': function () {
+            if (state._resolve) {
+              state._resolve(null);
+              state._resolve = null;
+            }
+          },
+          // User dismissed the challenge popup, or a shown challenge expired
+          // before being solved. Resolve with no token so the submit flow
+          // continues (server rejects -> visible error -> retry) instead of
+          // hanging forever on a never-settled promise.
+          'close-callback': function () {
+            if (state._resolve) {
+              state._resolve(null);
+              state._resolve = null;
+            }
+          },
+          'chalexpired-callback': function () {
+            if (state._resolve) {
+              state._resolve(null);
+              state._resolve = null;
+            }
+          },
+          'expired-callback': function () {
+            state.token = null;
+          },
+        });
+        state.ready = true;
+      })
+      .catch(function (err) {
+        console.warn('DE Form: hCaptcha setup failed', err);
+      });
+
+    return state;
+  }
+
+  // Resolves to a fresh hCaptcha token, or null if the widget isn't ready
+  // (in which case the server will reject a protected submission and the user
+  // can retry once it has loaded).
+  function getCaptchaToken(state) {
+    return new Promise(function (resolve) {
+      if (!state || !state.ready || !window.hcaptcha || state.widgetId === null) {
+        resolve(null);
+        return;
+      }
+      state._resolve = resolve;
+      try {
+        window.hcaptcha.reset(state.widgetId);
+        window.hcaptcha.execute(state.widgetId);
+      } catch (e) {
+        state._resolve = null;
+        resolve(null);
+      }
+    });
+  }
 
   // ===========================================
   // 1. ADD HIDDEN TRACKING FIELDS TO ALL FORMS
@@ -133,6 +271,49 @@
     addTrackingFields(form);
     populateTrackingFields(form);
 
+    // Ask the server whether this form is bot-protected (CRM "Require CAPTCHA"
+    // toggle). Nothing is injected unless the toggle is on AND hCaptcha keys
+    // are configured server-side. The request is time-bounded and failure-safe,
+    // so for unprotected forms it can never delay or block submission.
+    var configUrl = configUrlFor(form);
+    if (!configUrl) {
+      form._deConfigReady = Promise.resolve(false);
+    } else {
+      var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      var timer = controller
+        ? setTimeout(function () {
+            controller.abort();
+          }, 8000)
+        : null;
+
+      form._deConfigReady = fetch(configUrl, {
+        headers: { Accept: 'application/json' },
+        signal: controller ? controller.signal : undefined,
+      })
+        .then(function (res) {
+          return res.ok ? res.json() : null;
+        })
+        .then(function (cfg) {
+          if (cfg && cfg.require_captcha && cfg.hcaptcha_sitekey) {
+            setupCaptcha(form, cfg.hcaptcha_sitekey);
+            return true;
+          }
+          return false;
+        })
+        .catch(function () {
+          return false;
+        })
+        .then(function (isProtected) {
+          // .catch above means this never rejects; clear the abort timer and
+          // pass the result through. (Avoids Promise.prototype.finally, which
+          // is missing on some older browsers.)
+          if (timer) {
+            clearTimeout(timer);
+          }
+          return isProtected;
+        });
+    }
+
     var wrapper = form.closest('.w-form');
     var doneBox = wrapper ? wrapper.querySelector('.w-form-done') : null;
     var failBox = wrapper ? wrapper.querySelector('.w-form-fail') : null;
@@ -239,32 +420,62 @@
           fallbackForm.submit();
         }
 
-        fetch(endpoint, {
-          method: 'POST',
-          body: formData,
-          headers: {
-            Accept: 'application/json',
-          },
-        })
-          .then(function (res) {
-            return res
-              .json()
-              .catch(function () {
-                return {};
-              })
-              .then(function (data) {
-                if (res.ok && data.status === 'ok') {
-                  showSuccess();
-                } else {
-                  showError();
-                }
-              });
+        function sendFormData() {
+          fetch(endpoint, {
+            method: 'POST',
+            body: formData,
+            headers: {
+              Accept: 'application/json',
+            },
           })
-          .catch(function (err) {
-            // Network error - likely blocked by ad blocker.
-            // Fall back to regular form POST.
-            console.warn('DE Form: fetch blocked, falling back to form POST', err);
-            fallbackFormPost();
+            .then(function (res) {
+              return res
+                .json()
+                .catch(function () {
+                  return {};
+                })
+                .then(function (data) {
+                  if (res.ok && data.status === 'ok') {
+                    showSuccess();
+                  } else {
+                    showError();
+                  }
+                });
+            })
+            .catch(function (err) {
+              // Network error - likely blocked by ad blocker.
+              // Fall back to regular form POST.
+              console.warn('DE Form: fetch blocked, falling back to form POST', err);
+              fallbackFormPost();
+            });
+        }
+
+        // If this form is hCaptcha-protected, obtain a token before sending.
+        // Unprotected forms (the default) skip straight to the existing flow.
+        // Race the config check against a hard timeout so a stalled config
+        // request can never hang submission (defaults to "unprotected"; a
+        // genuinely protected form would then get a server 422 and retry).
+        var configReady = Promise.race([
+          Promise.resolve(form._deConfigReady),
+          new Promise(function (resolve) {
+            setTimeout(function () {
+              resolve(false);
+            }, 3000);
+          }),
+        ]);
+
+        configReady
+          .then(function (isProtected) {
+            return isProtected ? getCaptchaToken(form._deCaptcha) : null;
+          })
+          .then(function (token) {
+            if (token) {
+              formData.set('h-captcha-response', token);
+            }
+            sendFormData();
+          })
+          .catch(function () {
+            sendFormData();
           });
       },
       true,
