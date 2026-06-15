@@ -56,10 +56,36 @@
     }
   }
 
+  // We hide reCAPTCHA's floating badge (it collides with other fixed elements
+  // such as cookie banners) and instead show Google's required disclosure text
+  // under each protected form. Both run once and only for protected forms.
+  function hideRecaptchaBadge() {
+    if (document.getElementById('de-recaptcha-badge-style')) return;
+    var style = document.createElement('style');
+    style.id = 'de-recaptcha-badge-style';
+    style.textContent = '.grecaptcha-badge { visibility: hidden !important; }';
+    document.head.appendChild(style);
+  }
+
+  function addRecaptchaDisclosure(form) {
+    if (form.querySelector('.de-recaptcha-disclosure')) return;
+    // Google requires a short "protected by reCAPTCHA" notice when the badge is
+    // hidden (no Privacy/Terms links needed). Danish only — translations for
+    // other-language sites are handled separately.
+    var note = document.createElement('div');
+    note.className = 'de-recaptcha-disclosure';
+    note.style.cssText = 'font-size:11px;line-height:1.4;opacity:0.7;margin-top:8px;';
+    note.textContent = 'Dette websted er beskyttet af reCAPTCHA.';
+    form.appendChild(note);
+  }
+
   // reCAPTCHA v3 has no widget or challenge — we just load the script (with the
-  // sitekey) and request a token on demand at submit time.
+  // sitekey) and request a token on demand at submit time. The floating badge is
+  // hidden in favour of the disclosure line added below.
   function setupCaptcha(form, sitekey, action) {
     addBotProtectionFields(form);
+    hideRecaptchaBadge();
+    addRecaptchaDisclosure(form);
 
     var state = { sitekey: sitekey, action: action || 'lead_form', ready: false };
     form._deCaptcha = state;
