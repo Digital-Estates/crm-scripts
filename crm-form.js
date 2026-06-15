@@ -1,10 +1,9 @@
 (function () {
   var DE_FORM_SELECTOR = 'form[action*="digitalestates.dk"]';
-  var HCAPTCHA_API = 'https://js.hcaptcha.com/1/api.js?render=explicit';
-  var hcaptchaApiPromise = null;
+  var recaptchaApiPromise = null;
 
   // ===========================================
-  // 0. BOT PROTECTION (hCaptcha)
+  // 0. BOT PROTECTION (Google reCAPTCHA v3)
   // Activated per-form by the CRM "Require CAPTCHA" toggle. The server tells us
   // via the /config endpoint whether to render the widget; nothing below runs
   // for forms that have the toggle off.
@@ -17,28 +16,28 @@
     return action.replace(/\/leads(\?.*)?$/, '/config');
   }
 
-  function loadHcaptchaApi() {
-    if (window.hcaptcha) return Promise.resolve();
-    if (hcaptchaApiPromise) return hcaptchaApiPromise;
-    hcaptchaApiPromise = new Promise(function (resolve, reject) {
+  function loadRecaptchaApi(sitekey) {
+    if (window.grecaptcha && window.grecaptcha.execute) return Promise.resolve();
+    if (recaptchaApiPromise) return recaptchaApiPromise;
+    recaptchaApiPromise = new Promise(function (resolve, reject) {
       var s = document.createElement('script');
-      s.src = HCAPTCHA_API;
+      s.src = 'https://www.google.com/recaptcha/api.js?render=' + encodeURIComponent(sitekey);
       s.async = true;
       s.defer = true;
       s.onload = function () {
         resolve();
       };
       s.onerror = function () {
-        reject(new Error('hCaptcha failed to load'));
+        reject(new Error('reCAPTCHA failed to load'));
       };
       document.head.appendChild(s);
     });
-    return hcaptchaApiPromise;
+    return recaptchaApiPromise;
   }
 
   // Honeypot field — feeds the server-side honeypot check; only added to forms
   // that opt in via the CRM toggle. A real visitor never fills it.
-  // (No page-load timestamp: hCaptcha already covers timing-based bot detection,
+  // (No page-load timestamp: reCAPTCHA already covers timing-based bot detection,
   // and a fixed "too fast" gate risks rejecting a quick real lead.)
   function addBotProtectionFields(form) {
     if (!form.querySelector('input[name="website"]')) {
@@ -57,68 +56,30 @@
     }
   }
 
-  function setupCaptcha(form, sitekey) {
+  // reCAPTCHA v3 has no widget or challenge — we just load the script (with the
+  // sitekey) and request a token on demand at submit time.
+  function setupCaptcha(form, sitekey, action) {
     addBotProtectionFields(form);
 
-    var state = { sitekey: sitekey, widgetId: null, ready: false, token: null };
+    var state = { sitekey: sitekey, action: action || 'lead_form', ready: false };
     form._deCaptcha = state;
 
-    state.readyPromise = loadHcaptchaApi()
+    state.readyPromise = loadRecaptchaApi(sitekey)
       .then(function () {
-        var container = document.createElement('div');
-        container.style.display = 'none';
-        form.appendChild(container);
-
-        state.widgetId = window.hcaptcha.render(container, {
-          sitekey: sitekey,
-          size: 'invisible',
-          callback: function (token) {
-            state.token = token;
-            if (state._resolve) {
-              state._resolve(token);
-              state._resolve = null;
-            }
-          },
-          'error-callback': function () {
-            if (state._resolve) {
-              state._resolve(null);
-              state._resolve = null;
-            }
-          },
-          // User dismissed the challenge popup, or a shown challenge expired
-          // before being solved. Resolve with no token so the submit flow
-          // continues (server rejects -> visible error -> retry) instead of
-          // hanging forever on a never-settled promise.
-          'close-callback': function () {
-            if (state._resolve) {
-              state._resolve(null);
-              state._resolve = null;
-            }
-          },
-          'chalexpired-callback': function () {
-            if (state._resolve) {
-              state._resolve(null);
-              state._resolve = null;
-            }
-          },
-          'expired-callback': function () {
-            state.token = null;
-          },
-        });
         state.ready = true;
       })
       .catch(function (err) {
-        console.warn('DE Form: hCaptcha setup failed', err);
+        console.warn('DE Form: reCAPTCHA setup failed', err);
       });
 
     return state;
   }
 
-  // Resolves to a fresh hCaptcha token, or null if the widget genuinely failed
-  // to load (e.g. blocked by an ad-blocker) — in which case the server rejects
-  // and the user sees a retry-able error. Waits for the widget to finish
-  // initialising first (capped), so a fast submit doesn't fail just because
-  // hCaptcha hadn't loaded yet.
+  // Resolves to a fresh reCAPTCHA token, or null if the script genuinely failed
+  // to load (e.g. blocked by an extension) — in which case the server rejects
+  // and the user sees a retry-able error. Waits for the script to finish loading
+  // first (capped), so a fast submit doesn't fail just because reCAPTCHA hadn't
+  // loaded yet.
   function getCaptchaToken(state) {
     if (!state) {
       return Promise.resolve(null);
@@ -133,16 +94,22 @@
 
     return ready.then(function () {
       return new Promise(function (resolve) {
-        if (!state.ready || !window.hcaptcha || state.widgetId === null) {
+        if (!state.ready || !window.grecaptcha || !window.grecaptcha.execute) {
           resolve(null);
           return;
         }
-        state._resolve = resolve;
         try {
-          window.hcaptcha.reset(state.widgetId);
-          window.hcaptcha.execute(state.widgetId);
+          window.grecaptcha.ready(function () {
+            window.grecaptcha
+              .execute(state.sitekey, { action: state.action })
+              .then(function (token) {
+                resolve(token || null);
+              })
+              .catch(function () {
+                resolve(null);
+              });
+          });
         } catch (e) {
-          state._resolve = null;
           resolve(null);
         }
       });
@@ -282,7 +249,7 @@
     populateTrackingFields(form);
 
     // Ask the server whether this form is bot-protected (CRM "Require CAPTCHA"
-    // toggle). Nothing is injected unless the toggle is on AND hCaptcha keys
+    // toggle). Nothing is injected unless the toggle is on AND reCAPTCHA keys
     // are configured server-side. The request is time-bounded and failure-safe,
     // so for unprotected forms it can never delay or block submission.
     var configUrl = configUrlFor(form);
@@ -304,8 +271,8 @@
           return res.ok ? res.json() : null;
         })
         .then(function (cfg) {
-          if (cfg && cfg.require_captcha && cfg.hcaptcha_sitekey) {
-            setupCaptcha(form, cfg.hcaptcha_sitekey);
+          if (cfg && cfg.require_captcha && cfg.recaptcha_sitekey) {
+            setupCaptcha(form, cfg.recaptcha_sitekey, cfg.recaptcha_action);
             return true;
           }
           return false;
@@ -491,17 +458,17 @@
               return res.ok ? res.json() : null;
             })
             .then(function (cfg) {
-              if (!cfg || !cfg.require_captcha || !cfg.hcaptcha_sitekey) {
+              if (!cfg || !cfg.require_captcha || !cfg.recaptcha_sitekey) {
                 // Config no longer says protected — just resend once.
                 sendFormData();
                 return;
               }
               if (!form._deCaptcha) {
-                setupCaptcha(form, cfg.hcaptcha_sitekey);
+                setupCaptcha(form, cfg.recaptcha_sitekey, cfg.recaptcha_action);
               }
               getCaptchaToken(form._deCaptcha).then(function (token) {
                 if (token) {
-                  formData.set('h-captcha-response', token);
+                  formData.set('g-recaptcha-response', token);
                 }
                 sendFormData();
               });
@@ -511,7 +478,7 @@
             });
         }
 
-        // If this form is hCaptcha-protected, obtain a token before sending.
+        // If this form is reCAPTCHA-protected, obtain a token before sending.
         // Unprotected forms (the default) skip straight to the existing flow.
         // Race the config check against a hard timeout so a stalled config
         // request can never hang submission (defaults to "unprotected"; a
@@ -531,7 +498,7 @@
           })
           .then(function (token) {
             if (token) {
-              formData.set('h-captcha-response', token);
+              formData.set('g-recaptcha-response', token);
             }
             sendFormData();
           })
