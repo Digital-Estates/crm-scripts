@@ -69,15 +69,21 @@
 
   // Google requires a short "protected by reCAPTCHA" notice when the badge is
   // hidden (no Privacy/Terms links needed). The notice is injected in JS, so the
-  // site's translation tooling never sees it — we localise here off the page's
-  // <html lang> (set per locale by Webflow). Unmapped locales fall back to Danish.
+  // site's translation tooling never sees it — we localise here. Unmapped
+  // locales fall back to Danish.
   var RECAPTCHA_DISCLOSURE = {
     da: 'Dette websted er beskyttet af reCAPTCHA.',
     en: 'This site is protected by reCAPTCHA.'
   };
 
   function recaptchaDisclosureText() {
-    var lang = (document.documentElement.lang || 'da').toLowerCase().split('-')[0];
+    // This site has no <html lang>; English pages live under /en/, Danish at the
+    // root. Honour <html lang> first in case another site sets it, then fall back
+    // to the URL path.
+    var lang = (document.documentElement.lang || '').toLowerCase().split('-')[0];
+    if (!RECAPTCHA_DISCLOSURE[lang]) {
+      lang = /^\/en(\/|$)/.test(location.pathname) ? 'en' : 'da';
+    }
     return RECAPTCHA_DISCLOSURE[lang] || RECAPTCHA_DISCLOSURE.da;
   }
 
