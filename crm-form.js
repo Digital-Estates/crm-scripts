@@ -67,15 +67,26 @@
     document.head.appendChild(style);
   }
 
+  // Google requires a short "protected by reCAPTCHA" notice when the badge is
+  // hidden (no Privacy/Terms links needed). The notice is injected in JS, so the
+  // site's translation tooling never sees it — we localise here off the page's
+  // <html lang> (set per locale by Webflow). Unmapped locales fall back to Danish.
+  var RECAPTCHA_DISCLOSURE = {
+    da: 'Dette websted er beskyttet af reCAPTCHA.',
+    en: 'This site is protected by reCAPTCHA.'
+  };
+
+  function recaptchaDisclosureText() {
+    var lang = (document.documentElement.lang || 'da').toLowerCase().split('-')[0];
+    return RECAPTCHA_DISCLOSURE[lang] || RECAPTCHA_DISCLOSURE.da;
+  }
+
   function addRecaptchaDisclosure(form) {
     if (form.querySelector('.de-recaptcha-disclosure')) return;
-    // Google requires a short "protected by reCAPTCHA" notice when the badge is
-    // hidden (no Privacy/Terms links needed). Danish only — translations for
-    // other-language sites are handled separately.
     var note = document.createElement('div');
     note.className = 'de-recaptcha-disclosure';
     note.style.cssText = 'font-size:11px;line-height:1.4;opacity:0.7;margin-top:8px;';
-    note.textContent = 'Dette websted er beskyttet af reCAPTCHA.';
+    note.textContent = recaptchaDisclosureText();
     form.appendChild(note);
   }
 
